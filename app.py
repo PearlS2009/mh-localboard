@@ -1,8 +1,11 @@
 import streamlit as st
 import html
+import re
 from supabase import create_client
 from datetime import date, timedelta
 from PIL import Image
+
+st.set_page_config(page_title="MH Local Board", layout="wide")
 
 TIPS = [
     "Pay yourself first. Move some of every paycheck into savings before you spend the rest.",
@@ -22,6 +25,8 @@ TYPE_TIPS = {
     "service": "Charge for prep, travel and supplies too, not just the hours you work.",
     "vacancy": "Be upfront about pay, and never charge people a fee to apply.",
     "jobneeded": "Ask about pay and hours first, and never pay to get a job. That's a scam.",
+    "lookingtobuy": "Check the item before you pay, and meet in a public place.",
+    "community": "Meet a new group in a public place first, and bring a parent or friend if you're under 18.",
 }
 
 TYPE_LABELS = {
@@ -29,7 +34,11 @@ TYPE_LABELS = {
     "jobneeded": "Looking for work",
     "service": "Service",
     "sale": "For sale",
+    "lookingtobuy": "Looking to buy",
+    "community": "Community",
 }
+
+TYPE_OPTIONS = ["vacancy", "jobneeded", "service", "sale", "lookingtobuy", "community"]
 
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
@@ -40,8 +49,8 @@ supabase_connection = st.session_state.supabase_connection
 
 st.markdown("""
 <style>
-div[data-baseweb="tab-list"] { gap: 0; justify-content: space-between; }
-button[data-baseweb="tab"] { flex: 1; justify-content: center; font-size: 1.05rem; padding: 10px 0; }
+div[data-baseweb="tab-list"] { gap: 6px; justify-content: flex-start; }
+button[data-baseweb="tab"] { flex: 0 1 auto; justify-content: center; font-size: 0.95rem; padding: 10px 12px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -55,6 +64,14 @@ def note(text):
         f'{html.escape(text)}</div>',
         unsafe_allow_html=True,
     )
+
+def valid_contact(text):
+    text = text.strip()
+    is_email = re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", text)
+    is_handle = re.fullmatch(r"@[A-Za-z0-9._]{1,30}", text)
+    digits = re.sub(r"\D", "", text)
+    is_phone = re.fullmatch(r"[\d\s().+-]+", text) and 10 <= len(digits) <= 15
+    return bool(is_email or is_handle or is_phone)
 
 def user_is_minor():
     """True if the logged-in user signed up as 13-17."""
@@ -146,12 +163,12 @@ strip_h = w // 6
 top = int(h * 0.50)
 img = img.crop((0, top, w, min(h, top + strip_h)))
 st.image(img, use_container_width=True)
-st.title("mountainhouse.localboard")
+st.title("Mountain House Local Board")
 st.caption("What's up in Mountain House?")
 
 def render_listings(rows):
     if not rows:
-        st.info("Nothing here yet. Be the first to post.")
+        note("Nothing here yet. Be the first to post.")
         return
 
     for listing in rows:
@@ -202,13 +219,17 @@ def show_feed():
     jobs = of_type("jobneeded")
     services = of_type("service")
     sales = of_type("sale")
+    lookingtobuy = of_type("lookingtobuy")
+    community = of_type("community")
 
-    tab_all, tab_vac, tab_job, tab_srv, tab_sale = st.tabs([
+    tab_all, tab_vac, tab_job, tab_srv, tab_sale, tab_lookingtobuy, tab_community = st.tabs([
         f"All ({len(rows)})",
         f"Hiring ({len(vacancies)})",
         f"Looking for work ({len(jobs)})",
         f"Services ({len(services)})",
         f"For sale ({len(sales)})",
+        f"Looking to buy ({len(lookingtobuy)})",
+        f"Community ({len(community)})",
     ])
     with tab_all:
         render_listings(rows)
@@ -220,6 +241,10 @@ def show_feed():
         render_listings(services)
     with tab_sale:
         render_listings(sales)
+    with tab_lookingtobuy:
+        render_listings(lookingtobuy)
+    with tab_community:
+        render_listings(community)
 
 # Create Post
 def show_post_form():
@@ -233,7 +258,7 @@ def show_post_form():
         title = st.text_input("Title")
         type_ = st.selectbox(
             "Type",
-            ["vacancy", "jobneeded", "service", "sale"],
+            ["vacancy", "jobneeded", "service", "sale", "lookingtobuy", "community"],
             format_func=lambda t: TYPE_LABELS[t],
         )
         category = st.text_input("Category (optional)", placeholder="e.g. Tutoring, Furniture, Events")
@@ -243,7 +268,10 @@ def show_post_form():
             note(f"For safety, people will contact your parent/guardian: {guardian_email}")
             contact = guardian_email
         else:
-            contact = st.text_input("How should people reach you? (email, phone, or Instagram)")
+            contact = st.text_input(
+                "How should people reach you? (email, phone, or Instagram)",
+                placeholder="name@email.com, XXX-XXX-XXXX, or @yourhandle",
+            )
 
         expires_at = st.date_input(
             "Expires on (default is 60 days from today)",
@@ -252,7 +280,11 @@ def show_post_form():
         submitted = st.form_submit_button("Post listing")
 
     if submitted:
-        if title and description and contact:
+        if not (title and description and contact):
+            st.error("Hold up, you still need to fill in the title, description and contact.")
+        elif not is_minor and not valid_contact(contact):
+            st.error("That contact doesn't look right. Use an email (name@example.com), a phone number (209-555-0123), or an Instagram handle (@yourname).")
+        else:
             try:
                 supabase_connection.table("listings").insert({
                     "title": title,
@@ -264,14 +296,12 @@ def show_post_form():
                     "is_minor": is_minor,
                     "user_id": st.session_state.user.id,
                 }).execute()
-                #st.session_state.flash = "Listing posted!"
                 st.session_state.flash = f"Listing posted! Tip: {TYPE_TIPS[type_]}"
                 st.session_state.go_home = True
                 st.rerun()
             except Exception as e:
                 st.error(f"Could not post: {e}")
-        else:
-            st.error("Hold up, you still need to fill in the title, description and contact.")
+
 
 # Update/Delete Post
 def show_my_listings():
@@ -292,14 +322,29 @@ def show_my_listings():
         .data
     )
     if not mine:
-        st.info("You haven't posted anything yet. Your first one only takes a moment.")
+        note("You haven't posted anything yet. Your first one only takes a moment.")
 
     for item in mine:
         expired = item["expires_at"] < str(today)
         status = ":red[Expired]" if expired else ":green[Active]"
-        with st.expander(f"{item['title']}  ({status})"):    
+        with st.expander(f"{item['title']}  ({status})"):
             st.caption(f"{'Expired on' if expired else 'Active until'} {item['expires_at']}")
             new_title = st.text_input("Title", item["title"], key=f"title_{item['id']}")
+
+            current_type = item["type"].strip()
+            new_type = st.selectbox(
+                "Type",
+                TYPE_OPTIONS,
+                index=TYPE_OPTIONS.index(current_type) if current_type in TYPE_OPTIONS else 0,
+                format_func=lambda t: TYPE_LABELS.get(t, t),
+                key=f"type_{item['id']}",
+            )
+            new_category = st.text_input(
+                "Category (optional)",
+                item.get("category") or "",
+                key=f"cat_{item['id']}",
+                placeholder="e.g. Tutoring, Furniture, Events",
+            )
             new_desc = st.text_area("Description", item["description"], key=f"desc_{item['id']}")
             new_contact = st.text_input(
                 "Contact", item.get("contact") or "",
@@ -325,11 +370,15 @@ def show_my_listings():
 
                 if missing:
                     st.error("Hold up, you still need: " + ", ".join(missing))
+                elif not is_minor and not valid_contact(new_contact):
+                    st.error("That contact doesn't look right. Use an email, a phone number, or an Instagram handle like @yourname.")
                 else:
                     supabase_connection.table("listings").update({
-                        "title": new_title,
-                        "description": new_desc,
-                        "contact": new_contact,
+                        "title": new_title.strip(),
+                        "type": new_type,
+                        "category": new_category.strip(),
+                        "description": new_desc.strip(),
+                        "contact": new_contact.strip(),
                         "expires_at": str(new_expiry),
                     }).eq("id", item["id"]).execute()
                     st.session_state.my_flash = "Changes saved! You're good."
@@ -341,7 +390,6 @@ def show_my_listings():
                     st.rerun()
                 else:
                     st.warning("Tick the box first to confirm.")
-
 # Show chosen page
 if page == "Post a listing":
     show_post_form()
